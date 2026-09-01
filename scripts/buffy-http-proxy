@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Minimal local HTTP CONNECT proxy backed by ``ssh server -W``."""
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import select
+import subprocess
+
+HOST = "127.0.0.1"
+PORT = 18765
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_CONNECT(self):
+        if ":" not in self.path:
+            self.send_error(400, "Expected host:port")
+            return
+        host, port = self.path.rsplit(":", 1)
+        if not port.isdigit():
+            self.send_error(400, "Invalid port")
+            return
+        upstream = subprocess.Popen(
+            ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+             "-W", f"{host}:{port}", "server"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, bufsize=0,
+        )
+        try:
+            self.send_response(200, "Connection established")
+            self.end_headers()
+            client = self.connection
+            while upstream.poll() is None:
+                readable, _, _ = select.select([client, upstream.stdout], [], [], 30)
+                if client in readable:
+                    data = client.recv(65536)
+                    if not data:
+                        break
+                    upstream.stdin.write(data)
+                    upstream.stdin.flush()
+                if upstream.stdout in readable:
+                    data = upstream.stdout.read(65536)
+                    if not data:
+                        break
+                    client.sendall(data)
+        finally:
+            upstream.terminate()
+            try:
+                upstream.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                upstream.kill()
+
+    def log_message(self, _format, *_args):
+        pass
+
+
+if __name__ == "__main__":
+    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

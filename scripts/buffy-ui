@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Window-scoped AT-SPI mouse and keyboard control for Buffy."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+import pyatspi
+
+
+def windows():
+    desktop = pyatspi.Registry.getDesktop(0)
+    for app in desktop:
+        for child in app:
+            if child is not None and child.getRole() in (pyatspi.ROLE_FRAME, pyatspi.ROLE_DIALOG, pyatspi.ROLE_WINDOW):
+                yield app, child
+
+
+def window_info(app, win):
+    state = win.getState()
+    try:
+        ext = win.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+        bounds = [ext.x, ext.y, ext.width, ext.height]
+    except Exception:
+        bounds = None
+    return {
+        "app": app.name,
+        "title": win.name,
+        "active": state.contains(pyatspi.STATE_ACTIVE),
+        "focused": state.contains(pyatspi.STATE_FOCUSED),
+        "bounds": bounds,
+    }
+
+
+def resolve_window(query: str):
+    needle = query.casefold().strip()
+    matches = [(app, win) for app, win in windows()
+               if needle in f"{app.name} {win.name}".casefold()]
+    if len(matches) != 1:
+        names = [f"{app.name}: {win.name}" for app, win in matches]
+        raise ValueError(f"پنجره باید دقیقاً یکی باشد؛ matches={names}")
+    return matches[0]
+
+
+def require_active(app, win):
+    if not win.getState().contains(pyatspi.STATE_ACTIVE):
+        raise ValueError(f"پنجره فعال نیست: {app.name}: {win.name}")
+
+
+def require_inside(win, x: int, y: int):
+    ext = win.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+    if ext.width <= 0 or ext.height <= 0 or not (ext.x <= x < ext.x + ext.width and ext.y <= y < ext.y + ext.height):
+        raise ValueError("مختصات بیرون پنجرهٔ هدف است.")
+
+
+def parser():
+    root = argparse.ArgumentParser(description=__doc__)
+    sub = root.add_subparsers(dest="command", required=True)
+    sub.add_parser("windows")
+    sub.add_parser("inspect-active")
+    for command in ("move", "click"):
+        item = sub.add_parser(command)
+        item.add_argument("--window", required=True)
+        item.add_argument("x", type=int)
+        item.add_argument("y", type=int)
+    typing = sub.add_parser("type")
+    typing.add_argument("--window", required=True)
+    typing.add_argument("--text", required=True)
+    return root.parse_args()
+
+
+def main():
+    args = parser()
+    if args.command == "windows":
+        for app, win in windows():
+            print(window_info(app, win))
+        return
+    if args.command == "inspect-active":
+        active = [(app, win) for app, win in windows()
+                  if win.getState().contains(pyatspi.STATE_ACTIVE)]
+        if len(active) != 1:
+            raise ValueError(f"پنجرهٔ فعال یکتا نیست؛ count={len(active)}")
+        app, win = active[0]
+        visible = []
+        queue = [(win, 0)]
+        protected_role = getattr(pyatspi, 'ROLE_PASSWORD_TEXT', None)
+        protected_state = getattr(pyatspi, 'STATE_PROTECTED', None)
+        while queue and len(visible) < 120:
+            node, depth = queue.pop(0)
+            if node is None or depth > 7:
+                continue
+            try:
+                state = node.getState()
+                if state.contains(pyatspi.STATE_DEFUNCT) or (protected_state is not None and state.contains(protected_state)):
+                    continue
+                role = node.getRole()
+                if protected_role is not None and role == protected_role:
+                    continue
+                name = (node.name or '').strip()
+                if name and name not in visible:
+                    visible.append(name[:300])
+                for child in node:
+                    queue.append((child, depth + 1))
+            except Exception:
+                continue
+        print(json.dumps({"window": window_info(app, win), "visible": visible}, ensure_ascii=False))
+        return
+    app, win = resolve_window(args.window)
+    require_active(app, win)
+    if args.command in ("move", "click"):
+        require_inside(win, args.x, args.y)
+        pyatspi.Registry.generateMouseEvent(args.x, args.y, "abs")
+        if args.command == "click":
+            pyatspi.Registry.generateMouseEvent(args.x, args.y, "b1c")
+    else:
+        pyatspi.Registry.generateKeyboardEvent(0, args.text, pyatspi.KEY_STRING)
+    time.sleep(0.15)
+    print({"status": "ok", "window": window_info(app, win), "action": args.command})
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (LookupError, RuntimeError, ValueError) as error:
+        raise SystemExit(f"error: {error}")

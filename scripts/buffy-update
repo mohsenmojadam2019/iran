@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Safe Buffy refresh: source metadata and verified local knowledge only."""
+import argparse
+import os
+import subprocess
+import sys
+
+def run(cmd):
+    return subprocess.run(cmd, text=True, check=False)
+
+def main():
+    parser = argparse.ArgumentParser(description='Refresh Buffy safely')
+    parser.add_argument('--sync-sources', action='store_true', help='fetch one bounded GitHub metadata page')
+    parser.add_argument('--import-jsonl', metavar='PATH', help='import evidence-backed Q&A JSONL')
+    parser.add_argument('--status', action='store_true')
+    args = parser.parse_args()
+    if not any((args.sync_sources, args.import_jsonl, args.status)):
+        parser.error('choose --sync-sources, --import-jsonl or --status')
+    if args.sync_sources:
+        run([sys.executable, os.path.expanduser('~/.local/bin/buffy-sources'), 'sync', '--force'])
+    if args.import_jsonl:
+        run([os.path.expanduser('~/.local/bin/buffy-knowledge'), 'import-jsonl', args.import_jsonl])
+    if args.status:
+        run([os.path.expanduser('~/.local/bin/buffy-sources'), 'status'])
+        run([os.path.expanduser('~/.local/bin/buffy-knowledge'), 'stats'])
+    print('این به‌روزرسانی فقط metadata و دانشِ دارای evidence را تغییر می‌دهد؛ کد، skill یا مخزن ناشناخته خودکار اجرا/نصب نمی‌شود.')
+
+if __name__ == '__main__':
+    main()

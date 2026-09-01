@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Find and open a legal Iranian watch page for a spoken movie request."""
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import urllib.parse
+
+CODEX = os.path.expanduser("~/.local/bin/codex")
+ALLOWED_DOMAINS = {
+    "filimo.com", "www.filimo.com", "namava.ir", "www.namava.ir",
+    "telewebion.com", "www.telewebion.com", "aparat.com", "www.aparat.com",
+    "hashure.com", "www.hashure.com", "vodio.ir", "www.vodio.ir",
+}
+
+
+def extract_json(value):
+    match = re.search(r"\{.*\}", value, re.DOTALL)
+    if not match:
+        raise ValueError("پاسخ جست‌وجو قابل پردازش نبود.")
+    return json.loads(match.group(0))
+
+
+def validate_url(value):
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_DOMAINS:
+        raise ValueError("لینک پیدا‌شده متعلق به سرویس قانونیِ تأییدشده نبود.")
+    return value
+
+
+def main():
+    request_text = " ".join(sys.argv[1:]).strip()
+    if not request_text:
+        raise SystemExit("نام فیلم گفته نشد.")
+    output_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="buffy-movie-", suffix=".json", delete=False) as output:
+            output_path = output.name
+        prompt = f"""
+در وب عمیق جست‌وجو کن و درخواست فارسی زیر را به عنوان نام/مشخصات فیلم تحلیل کن:
+{request_text[:1000]}
+
+فقط صفحه مستقیم و رایگانِ قانونی تماشای همین اثر را از سرویس‌های ایرانی معتبر پیدا کن.
+دامنه‌های مجاز: filimo.com, namava.ir, telewebion.com, aparat.com, hashure.com, vodio.ir
+سایت دانلود غیرمجاز، کانال، تورنت، لینک فایل مستقیم، سایت بازنشر و نتیجه نامطمئن ممنوع است.
+موجود بودن صفحه، تطابق دقیق عنوان و قانونی بودن منبع را بررسی کن.
+فقط یک JSON معتبر و بدون markdown برگردان:
+{{"title":"عنوان دقیق","url":"https://...","access":"free","source":"نام سرویس"}}
+اگر هیچ نتیجه مطمئن نیست: {{"title":"عنوان","url":"","access":"not-found","source":""}}
+"""
+        result = subprocess.run(
+            [CODEX, "--search", "exec", "--skip-git-repo-check", "-C", os.path.expanduser("~"),
+             "-o", output_path, prompt],
+            capture_output=True, text=True, timeout=180,
+        )
+        content = open(output_path, encoding="utf-8").read().strip()
+        if result.returncode != 0 or not content:
+            raise RuntimeError("جست‌وجوی فیلم کامل نشد.")
+        data = extract_json(content)
+        if not data.get("url"):
+            print(json.dumps({"ok": False, "message": "نسخهٔ رایگان و قانونی مطمئنی برای این فیلم پیدا نشد."}, ensure_ascii=False))
+            return
+        if data.get("access") != "free":
+            print(json.dumps({"ok": False, "message": "این نتیجه رایگان نبود؛ صفحه‌ای باز نکردم."}, ensure_ascii=False))
+            return
+        url = validate_url(data["url"])
+        subprocess.Popen(["/usr/bin/google-chrome", url], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        access_names = {"free": "رایگان قانونی"}
+        access = access_names.get(data.get("access"), data.get("access", ""))
+        message = f"پیدا شد؛ {data.get('title', 'فیلم')} در {data.get('source', 'سرویس قانونی')} باز شد"
+        if access:
+            message += f"، دسترسی {access} است"
+        print(json.dumps({"ok": True, "message": message + ".", "url": url}, ensure_ascii=False))
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(json.dumps({"ok": False, "message": str(error)}, ensure_ascii=False))
+    finally:
+        if output_path:
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
+
+
+if __name__ == "__main__":
+    main()

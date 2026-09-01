@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Open Buffy's persistent web session directly in Chrome.
+
+The voice command must not unexpectedly launch Hiddify.  A proxy can still be
+provided explicitly with BUFFY_PROXY when a network requires one.
+"""
+import os
+import subprocess
+import sys
+import urllib.parse
+
+TARGETS = {
+    "deepseek": "https://chat.deepseek.com/",
+    "dola": "https://chat.dola.com/",
+    "chatgpt": "https://chatgpt.com/",
+    "google": "https://www.google.com/",
+}
+PROFILE = os.path.expanduser("~/.config/buffy/browser-profile")
+DIRECT_DEEPSEEK_PROFILE = os.path.expanduser("~/.config/buffy/deepseek-direct-profile")
+
+
+def resolve_target(value):
+    if value in TARGETS:
+        return TARGETS[value]
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme == "https" and parsed.netloc:
+        return value
+    raise SystemExit("هدف باید deepseek، dola، chatgpt، google یا یک URL امن https باشد.")
+
+
+def main():
+    target = resolve_target(sys.argv[1] if len(sys.argv) > 1 else "deepseek")
+    prompt = sys.argv[2].strip() if len(sys.argv) > 2 else ""
+    if prompt and target.endswith("chat.deepseek.com/"):
+        target += "?prompt=" + urllib.parse.quote(prompt[:2000], safe="")
+    # Chrome reuses an already-running profile process, including its old
+    # proxy flags. Keep DeepSeek in a dedicated profile and explicitly disable
+    # proxies so a stale Hiddify session cannot affect it.
+    proxy = os.environ.get("BUFFY_PROXY", "").strip()
+    profile = DIRECT_DEEPSEEK_PROFILE if target.startswith("https://chat.deepseek.com/") and not proxy else PROFILE
+    os.makedirs(profile, exist_ok=True)
+    chrome = "/usr/bin/google-chrome"
+    args = [chrome, "--user-data-dir=" + profile, "--no-first-run"]
+    if target.startswith("https://chat.deepseek.com/"):
+        # The isolated Buffy profile does not need extensions or background
+        # apps; keeping them off reduces renderer count and idle RAM.
+        args.extend(["--disable-extensions", "--disable-background-mode"])
+    if proxy:
+        args.append("--proxy-server=" + proxy)
+    elif target.startswith("https://chat.deepseek.com/"):
+        args.append("--no-proxy-server")
+    args.append(target)
+    subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+       stderr=subprocess.DEVNULL, start_new_session=True)
+    print(f"Buffy web session opened directly: {target}")
+
+
+if __name__ == "__main__":
+    main()

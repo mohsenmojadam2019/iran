@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Buffy terminal persona powered by the installed Codex CLI."""
+import os
+import json
+import socket
+import subprocess
+import sys
+import time
+
+
+def sync_learning_sources():
+    """Advance the 1000-source catalog without delaying or breaking chat startup."""
+    helper = os.path.expanduser("~/.local/bin/buffy-sources")
+    if not os.path.isfile(helper):
+        return
+    try:
+        subprocess.run([sys.executable, helper, "sync"], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=25, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def port_is_open(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def start_voice_interface():
+    if not port_is_open(7654):
+        server = subprocess.Popen(
+            [sys.executable, os.path.expanduser("~/.local/bin/buffy-server")],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        pids_path = os.path.expanduser("~/.buffy-pids.json")
+        try:
+            with open(pids_path, encoding="utf-8") as file:
+                pids = json.load(file)
+        except (OSError, ValueError):
+            pids = {}
+        pids["server"] = server.pid
+        with open(pids_path, "w", encoding="utf-8") as file:
+            json.dump(pids, file)
+        for _ in range(20):
+            if port_is_open(7654):
+                break
+            time.sleep(0.1)
+    subprocess.Popen(
+        [sys.executable, os.path.expanduser("~/.local/bin/buffy-voice-ui")],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+
+
+def main():
+    codex = os.path.expanduser("~/.local/bin/codex")
+    if not os.path.isfile(codex):
+        raise SystemExit("❌ Codex CLI نصب نیست.")
+    sync_learning_sources()
+    start_voice_interface()
+    print("🤖 Buffy • powered by Codex", flush=True)
+    os.execv(
+        codex,
+        [
+            codex,
+            "--no-alt-screen",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--search",
+            "resume",
+            "--last",
+            "--all",
+            "--include-non-interactive",
+            "تو Buffy هستی، دستیار فنی متخصص و مهندس ارشد چندزبانه. هر سؤال برنامه‌نویسی یا علمی را دقیق، کامل و فارسی پاسخ بده؛ به‌جای ادعای داشتن میلیون‌ها ترفند، از اصول پایه، الگوهای قابل‌انتقال، تحلیل علت‌ومعلولی و منابع معتبر راه‌حل مناسب همان مسئله را استنتاج کن. برای واقعیت‌های ناشناخته، نسخه‌حساس یا جاری، با جست‌وجوی اینترنتی عمیق و منابع اولیه بررسی کن، ادعاها را با شواهد تطبیق بده و لینک منابع معتبر را نزدیک همان ادعاها بیاور؛ در موضوعات علمی، فرضیه، داده، روش محاسبه/آزمایش، عدم‌قطعیت و محدودیت را جدا کن. برای تحلیل پروژه، ابتدا AGENTS.md و مستندات را بخوان و سپس دستور `buffy-project-map` را روی ریشهٔ پروژه اجرا کن تا به‌جای خواندن کورکورانهٔ کل مخزن، فقط فایل‌های مرتبط را انتخاب کنی؛ وابستگی‌ها و build artifactها را نخوان مگر لازم باشد. پیشنهادها را بر اساس اثر، ریسک و هزینه اولویت‌بندی کن و برای هر مشکل root cause، گزینه‌ها، trade-off، تست بازگشتی، امنیت، کارایی و rollback را پوشش بده. اگر کاربر درخواست تغییر داد، ابتدا وضعیت Git و نسخه‌ها را بررسی کن، تغییر حداقلی بده و با تست و شواهد واقعی تأیید کن؛ ادعای انجام کاری را بدون اجرای موفق و راستی‌آزمایی مطرح نکن. همچنین دستورالعمل یادگیری Buffy را رعایت کن: فایل‌های ~/.config/buffy/LEARNING.md، CURRICULUM.md، learning-ledger.json و sources.json را بخوان؛ برای کار واقعی، کاربر را در اولویت قرار بده و فقط پس از شواهد واقعی از buffy-learning record استفاده کن.",
+        ],
+    )
+
+
+if __name__ == "__main__":
+    main()

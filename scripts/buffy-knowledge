@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Evidence-gated, local Q&A store for Buffy (SQLite + FTS5)."""
+import argparse
+import json
+import os
+import sqlite3
+from datetime import datetime, timezone
+
+DB_PATH = os.path.expanduser("~/.config/buffy/knowledge.sqlite3")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS qa (
+  id INTEGER PRIMARY KEY,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  topic TEXT NOT NULL DEFAULT 'general',
+  version TEXT,
+  source TEXT,
+  evidence TEXT,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','verified','rejected')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS qa_fts USING fts5(
+  question, answer, topic, content='qa', content_rowid='id'
+);
+CREATE TRIGGER IF NOT EXISTS qa_ai AFTER INSERT ON qa BEGIN
+  INSERT INTO qa_fts(rowid, question, answer, topic) VALUES (new.id, new.question, new.answer, new.topic);
+END;
+CREATE TRIGGER IF NOT EXISTS qa_ad AFTER DELETE ON qa BEGIN
+  INSERT INTO qa_fts(qa_fts, rowid, question, answer, topic) VALUES ('delete', old.id, old.question, old.answer, old.topic);
+END;
+CREATE TRIGGER IF NOT EXISTS qa_au AFTER UPDATE ON qa BEGIN
+  INSERT INTO qa_fts(qa_fts, rowid, question, answer, topic) VALUES ('delete', old.id, old.question, old.answer, old.topic);
+  INSERT INTO qa_fts(rowid, question, answer, topic) VALUES (new.id, new.question, new.answer, new.topic);
+END;
+"""
+
+def db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    con.executescript(SCHEMA)
+    return con
+
+def add(con, item):
+    status = item.get('status', 'draft')
+    if status == 'verified' and (not item.get('source') or not item.get('evidence')):
+        raise SystemExit('verified records require source and evidence')
+    now = datetime.now(timezone.utc).isoformat()
+    cur = con.execute(
+        'INSERT INTO qa(question,answer,topic,version,source,evidence,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        (item['question'].strip(), item['answer'].strip(), item.get('topic','general'),
+         item.get('version'), item.get('source'), item.get('evidence'), status, now, now))
+    con.commit()
+    return cur.lastrowid
+
+def main():
+    parser = argparse.ArgumentParser(prog='buffy-knowledge')
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    sub.add_parser('init')
+    a = sub.add_parser('add'); a.add_argument('--question', required=True); a.add_argument('--answer', required=True); a.add_argument('--topic', default='general'); a.add_argument('--version'); a.add_argument('--source'); a.add_argument('--evidence'); a.add_argument('--status', choices=['draft','verified','rejected'], default='draft')
+    imp = sub.add_parser('import-jsonl'); imp.add_argument('path')
+    s = sub.add_parser('search'); s.add_argument('query'); s.add_argument('--limit', type=int, default=5); s.add_argument('--all', action='store_true')
+    sub.add_parser('stats')
+    args = parser.parse_args(); con = db()
+    if args.cmd == 'init': print(DB_PATH); return
+    if args.cmd == 'add':
+        print(json.dumps({'id': add(con, vars(args)), 'db': DB_PATH}, ensure_ascii=False)); return
+    if args.cmd == 'import-jsonl':
+        count = 0
+        with open(args.path, encoding='utf-8') as fh:
+            for line_no, line in enumerate(fh, 1):
+                if not line.strip(): continue
+                try: add(con, json.loads(line)); count += 1
+                except (KeyError, json.JSONDecodeError, SystemExit) as exc: raise SystemExit(f'line {line_no}: {exc}')
+        print(json.dumps({'imported': count}, ensure_ascii=False)); return
+    if args.cmd == 'search':
+        filter_sql = "" if args.all else " AND qa.status='verified'"
+        rows = con.execute(f"SELECT qa.id,qa.question,qa.answer,qa.topic,qa.version,qa.source,qa.status FROM qa JOIN qa_fts ON qa_fts.rowid=qa.id WHERE qa_fts MATCH ?{filter_sql} ORDER BY bm25(qa_fts) LIMIT ?", (args.query, max(1, min(args.limit, 50)))).fetchall()
+        print(json.dumps([dict(row) for row in rows], ensure_ascii=False, indent=2)); return
+    if args.cmd == 'stats':
+        print(json.dumps([dict(row) for row in con.execute('SELECT status,COUNT(*) count FROM qa GROUP BY status')], ensure_ascii=False)); return
+
+if __name__ == '__main__': main()

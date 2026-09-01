@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""
+Buffy Voice Service - Opens voice page, commands go to server → terminal
+"""
+import subprocess
+import webbrowser
+import os
+import time
+import json
+
+HTML_FILE = os.path.expanduser("~/novinpendar/buffy-voice-service.html")
+
+def write_html():
+    html = """<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>🎙️ Buffy - بگو "برو چت"</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { 
+    font-family: Tahoma, Arial; 
+    background: #0a0a1a; color: white; 
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    height: 100vh;
+}
+.mic-btn {
+    width: 150px; height: 150px; border-radius: 50%;
+    background: #e74c3c; border: none; cursor: pointer;
+    font-size: 60px; transition: all 0.3s;
+}
+.mic-btn.listening { 
+    background: #2ecc71;
+    animation: glow 1.5s infinite;
+}
+@keyframes glow {
+    0%, 100% { box-shadow: 0 0 30px rgba(46,204,113,0.6); }
+    50% { box-shadow: 0 0 60px rgba(46,204,113,0.9); }
+}
+.status { margin: 20px 0; font-size: 22px; min-height: 30px; }
+.transcript { 
+    background: #16213e; padding: 20px; border-radius: 15px;
+    width: 90%; max-width: 500px; min-height: 60px; 
+    font-size: 20px; text-align: center; margin: 10px 0;
+}
+.result {
+    padding: 15px; border-radius: 10px; font-size: 18px;
+    margin: 10px 0; width: 90%; max-width: 500px; text-align: center;
+    display: none;
+}
+.result.success { display: block; background: #1a472a; color: #2ecc71; }
+.result.error { display: block; background: #4a1a1a; color: #e74c3c; }
+</style>
+</head>
+<body>
+
+<div class="status" id="status">🎤 روی دکمه کلیک کنید و بگید "برو چت"</div>
+
+<button class="mic-btn" id="micBtn" onclick="toggleMic()">🎤</button>
+
+<div class="transcript" id="transcript">صدای شما اینجا نمایش داده می‌شه...</div>
+
+<div class="result" id="result"></div>
+
+<script>
+let recognition;
+let isListening = false;
+
+function toggleMic() {
+    if (isListening) {
+        recognition.stop();
+        isListening = false;
+        document.getElementById('micBtn').classList.remove('listening');
+        document.getElementById('status').textContent = '⏸️ متوقف شد. دوباره کلیک کنید.';
+    } else {
+        startListening();
+    }
+}
+
+function startListening() {
+    if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+        document.getElementById('status').textContent = '❌ مرورگر شما از صدا پشتیبانی نمی‌کند';
+        return;
+    }
+    
+    let SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'fa-IR';
+    
+    recognition.onstart = function() {
+        isListening = true;
+        document.getElementById('micBtn').classList.add('listening');
+        document.getElementById('status').textContent = '🔴 دارم گوش میدم... "برو چت" بگید';
+        document.getElementById('result').className = 'result';
+        document.getElementById('result').style.display = 'none';
+    };
+    
+    recognition.onresult = function(event) {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+            transcript += event.results[i][0].transcript;
+        }
+        document.getElementById('transcript').textContent = transcript;
+        
+        // Check for final result
+        if (event.results[event.results.length - 1].isFinal) {
+            checkCommand(transcript);
+        }
+    };
+    
+    recognition.onerror = function(event) {
+        if (event.error === 'no-speech') return;
+        document.getElementById('status').textContent = '❌ خطا: ' + event.error;
+    };
+    
+    recognition.onend = function() {
+        if (isListening) {
+            try { recognition.start(); } catch(e) {}
+        }
+    };
+    
+    try { recognition.start(); } catch(e) {}
+}
+
+function checkCommand(text) {
+    let lower = text.toLowerCase();
+    
+    // Check for "برو چت"
+    if (lower.includes('برو چت') || lower.includes('چت کن') || lower.includes('چت بزن') || lower.includes('buffy')) {
+        document.getElementById('status').textContent = '✅ "برو چت" شناسایی شد!';
+        document.getElementById('result').className = 'result success';
+        document.getElementById('result').textContent = '🚀 ترمینال چت باز میشه...';
+        document.getElementById('result').style.display = 'block';
+        
+        // Send to server → server opens terminal
+        fetch('http://127.0.0.1:7654/command', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({command: 'open_chat', text: text})
+        })
+        .then(r => r.json())
+        .then(d => {
+            document.getElementById('result').textContent = '✅ ' + d.message;
+        })
+        .catch(e => {
+            document.getElementById('result').className = 'result error';
+            document.getElementById('result').textContent = '❌ سرور Buffy خاموشه! اول اجراش کنید: buffy';
+        });
+        
+        // Stop listening after command
+        setTimeout(() => {
+            recognition.stop();
+            isListening = false;
+            document.getElementById('micBtn').classList.remove('listening');
+        }, 500);
+    }
+    // Check for other commands
+    else if (lower.includes('برو سرور') || lower.includes('وضعیت')) {
+        document.getElementById('status').textContent = '✅ فرمان شناسایی شد!';
+        fetch('http://127.0.0.1:7654/command', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({command: 'server_status', text: text})
+        })
+        .then(r => r.json())
+        .then(d => {
+            document.getElementById('result').className = 'result success';
+            document.getElementById('result').textContent = d.message;
+            document.getElementById('result').style.display = 'block';
+        });
+    }
+}
+</script>
+</body>
+</html>"""
+    with open(HTML_FILE, 'w', encoding='utf-8') as f:
+        f.write(html)
+
+def main():
+    write_html()
+    print("🌐 Opening voice page in browser...")
+    webbrowser.open(f'file://{HTML_FILE}')
+    print("✅ Page opened! Click the mic button and say 'برو چت'")
+
+if __name__ == "__main__":
+    main()

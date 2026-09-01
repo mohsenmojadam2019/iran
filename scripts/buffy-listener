@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""
+Buffy Voice Listener - Always-on wake word detector
+Listens for "برو چت" and launches terminal chat
+"""
+import sounddevice as sd
+import numpy as np
+import speech_recognition as sr
+import subprocess
+import os
+import sys
+import signal
+import threading
+
+# Config
+SAMPLE_RATE = 16000
+CHUNK_DURATION = 3  # seconds per chunk
+WAKE_WORDS = ["برو چت", "برو چت", "چت کن", "buffy", "بافی"]
+
+# Colors
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+RED = "\033[31m"
+RESET = "\033[0m"
+
+running = True
+
+def signal_handler(sig, frame):
+    global running
+    running = False
+    print(f"\n{YELLOW}🛑 Listener stopped.{RESET}")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+def print_banner():
+    print(f"""
+{CYAN}╔══════════════════════════════════════════╗
+║  🎤 {GREEN}Buffy Voice Listener{RESET}{CYAN}                  ║
+║  در حال گوش دادن...                       ║
+║  بگید "برو چت" تا چت باز بشه             ║
+║  Ctrl+C برای توقف                         ║
+╚══════════════════════════════════════════╝{RESET}
+""")
+
+def record_audio(duration=CHUNK_DURATION):
+    """Record audio from microphone"""
+    try:
+        audio = sd.rec(int(duration * SAMPLE_RATE), 
+                       samplerate=SAMPLE_RATE, 
+                       channels=1, 
+                       dtype='int16')
+        sd.wait()
+        return audio.flatten()
+    except Exception as e:
+        print(f"{RED}❌ Microphone error: {e}{RESET}")
+        return None
+
+def detect_wake_word(audio_data):
+    """Check if wake word is in the audio"""
+    try:
+        recognizer = sr.Recognizer()
+        
+        # Convert numpy array to AudioData
+        audio_bytes = audio_data.tobytes()
+        audio_data_sr = sr.AudioData(audio_bytes, SAMPLE_RATE, 2)
+        
+        # Try Google Speech Recognition (free)
+        text = recognizer.recognize_google(audio_data_sr, language='fa-IR')
+        print(f"{CYAN}🎤 شنیدم: {text}{RESET}")
+        
+        # Check for wake words
+        text_lower = text.lower()
+        for word in WAKE_WORDS:
+            if word in text_lower:
+                return True, text
+        
+        return False, text
+        
+    except sr.UnknownValueError:
+        return False, None
+    except sr.RequestError as e:
+        print(f"{RED}❌ Speech API error: {e}{RESET}")
+        return False, None
+    except Exception as e:
+        return False, None
+
+def launch_chat():
+    """Launch terminal chat"""
+    print(f"\n{GREEN}🚀 در حال باز کردن چت...{RESET}")
+    try:
+        # Launch the terminal chat
+        subprocess.Popen(
+            ["python3", os.path.expanduser("~/.local/bin/چت")],
+            cwd=os.path.expanduser("~/novinpendar")
+        )
+    except Exception as e:
+        print(f"{RED}❌ Error launching chat: {e}{RESET}")
+
+def main():
+    print_banner()
+    
+    # Check microphone
+    print(f"{CYAN}🔍 Checking microphone...{RESET}")
+    try:
+        devices = sd.query_devices()
+        print(f"{GREEN}✅ Microphone found{RESET}")
+    except Exception as e:
+        print(f"{RED}❌ No microphone: {e}{RESET}")
+        print(f"{YELLOW}💡 Make sure your microphone is connected{RESET}")
+        return
+    
+    print(f"\n{GREEN}🎤 Listening for 'برو چت'...{RESET}\n")
+    
+    while running:
+        try:
+            # Record audio chunk
+            audio = record_audio(CHUNK_DURATION)
+            if audio is None:
+                continue
+            
+            # Check for wake word
+            detected, text = detect_wake_word(audio)
+            
+            if detected:
+                print(f"{GREEN}✅ Wake word detected!{RESET}")
+                launch_chat()
+                # Wait a bit before listening again
+                import time
+                time.sleep(2)
+                
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"{RED}❌ Error: {e}{RESET}")
+            continue
+
+if __name__ == "__main__":
+    main()

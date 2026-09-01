@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Print a bounded, read-only project map for fast Buffy context loading."""
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+EXCLUDES = {".git", "vendor", "node_modules", ".venv", "venv", "storage/logs", "dist", "build"}
+IMPORTANT = {
+    "AGENTS.md", "README.md", "composer.json", "composer.lock", "package.json",
+    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "pyproject.toml",
+    "requirements.txt", "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
+}
+
+
+def run(*args):
+    return subprocess.run(args, capture_output=True, text=True, check=False).stdout.strip()
+
+
+def main():
+    root = Path(sys.argv[1]).expanduser().resolve() if len(sys.argv) > 1 else Path.cwd().resolve()
+    if not root.is_dir():
+        raise SystemExit(f"project directory not found: {root}")
+    print(f"PROJECT {root}")
+    if (root / ".git").exists():
+        print(f"GIT {run('git', '-C', str(root), 'status', '-sb')}")
+        print(f"REMOTE {run('git', '-C', str(root), 'remote', '-v').splitlines()[:2]}")
+    files = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root)
+        if any(part in EXCLUDES for part in rel.parts):
+            continue
+        files.append(rel.as_posix())
+    files.sort()
+    important = [f for f in files if Path(f).name in IMPORTANT]
+    print("MANIFESTS " + (" | ".join(important) if important else "none"))
+    print(f"FILES {len(files)} (showing up to 180)")
+    for name in files[:180]:
+        print(name)
+    if len(files) > 180:
+        print(f"... {len(files) - 180} more files omitted")
+
+
+if __name__ == "__main__":
+    main()

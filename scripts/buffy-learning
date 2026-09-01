@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Manage Buffy's evidence-based competency and spaced-review ledger."""
+import argparse
+import json
+import os
+from datetime import date, datetime, timedelta, timezone
+
+BASE = os.path.expanduser("~/.config/buffy")
+LEDGER_PATH = os.path.join(BASE, "learning-ledger.json")
+EVENTS_PATH = os.path.join(BASE, "learning-events.jsonl")
+PRIORITY = [
+    "debugging", "git_github_ci", "linux_servers", "docker_devops",
+    "python", "laravel_php", "nextjs_typescript", "web_design_accessibility",
+    "ai_agents_bots", "persian_voice_agent", "comfyui_generation", "android_adb",
+    "continuous_source_research",
+]
+
+
+def load():
+    with open(LEDGER_PATH, encoding="utf-8") as file:
+        ledger = json.load(file)
+    ledger.setdefault("schema_version", 2)
+    ledger.setdefault("assessments", [])
+    ledger.setdefault("research_notes", [])
+    ledger.setdefault("reviews", [])
+    return ledger
+
+
+def save(ledger):
+    ledger["updated_at"] = date.today().isoformat()
+    temporary = LEDGER_PATH + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as file:
+        json.dump(ledger, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+    os.replace(temporary, LEDGER_PATH)
+
+
+def append_event(kind, data):
+    event = {"at": datetime.now(timezone.utc).isoformat(), "kind": kind, **data}
+    with open(EVENTS_PATH, "a", encoding="utf-8") as file:
+        file.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def next_competency(ledger):
+    competencies = ledger.get("competencies", {})
+    due_names = {x.get("competency") for x in ledger.get("reviews", [])
+                 if x.get("due", "9999-12-31") <= date.today().isoformat()
+                 and x.get("status", "due") == "due"}
+    for name in PRIORITY:
+        if name in due_names:
+            return name, "spaced-review-due"
+    ranked = sorted(competencies, key=lambda name: (
+        competencies[name].get("level", 0),
+        PRIORITY.index(name) if name in PRIORITY else len(PRIORITY),
+    ))
+    name = ranked[0] if ranked else ledger.get("next_topic")
+    return name, "lowest-evidence-priority"
+
+
+def status(ledger):
+    next_name, reason = next_competency(ledger)
+    print(f"Next competency: {next_name} ({reason})")
+    print(f"Verified events: {sum(len(x.get('evidence', [])) for x in ledger.get('competencies', {}).values())}")
+    print(f"Due reviews: {sum(1 for x in ledger.get('reviews', []) if x.get('due', '9999') <= date.today().isoformat() and x.get('status', 'due') == 'due')}")
+    for name, item in ledger.get("competencies", {}).items():
+        print(f"{name}: level {item.get('level', 0)} ({item.get('status', 'unknown')})")
+
+
+def record(ledger, args):
+    competencies = ledger.get("competencies", {})
+    if args.competency not in competencies:
+        raise SystemExit("Unknown competency: " + args.competency)
+    if not args.evidence.strip():
+        raise SystemExit("Evidence is required; reading or confidence is not evidence.")
+    item = competencies[args.competency]
+    current = int(item.get("level", 0))
+    requested = current if args.level is None else args.level
+    if requested < 0 or requested > 5 or requested > current + 1:
+        raise SystemExit("Level must be 0..5 and can advance by at most one per verified event.")
+    entry = {
+        "date": date.today().isoformat(), "title": args.title,
+        "evidence": args.evidence, "source": args.source or None,
+        "result": args.result, "level_after": requested,
+    }
+    item.setdefault("evidence", []).append(entry)
+    item["level"] = requested
+    item["status"] = "verified" if args.result == "pass" else "gap-observed"
+    interval = 1 if requested < 2 else 7 if requested < 4 else 30
+    ledger.setdefault("reviews", []).append({
+        "competency": args.competency, "due": (date.today() + timedelta(days=interval)).isoformat(),
+        "status": "due", "from_event": args.title,
+    })
+    next_name, _ = next_competency(ledger)
+    ledger["next_topic"] = next_name
+    save(ledger)
+    append_event("verified-learning", {"competency": args.competency, **entry})
+    print(json.dumps(entry, ensure_ascii=False, indent=2))
+
+
+def review(ledger, args):
+    matches = [x for x in ledger.get("reviews", []) if x.get("competency") == args.competency and x.get("status", "due") == "due"]
+    if not matches:
+        raise SystemExit("No pending review for competency")
+    target = matches[0]
+    target.update({"status": "passed" if args.result == "pass" else "failed",
+                   "reviewed_at": date.today().isoformat(), "evidence": args.evidence})
+    if args.result == "fail":
+        target["status"] = "due"
+        target["due"] = (date.today() + timedelta(days=1)).isoformat()
+    save(ledger)
+    append_event("spaced-review", {"competency": args.competency,
+                                   "result": args.result, "evidence": args.evidence})
+    print("Review recorded")
+
+
+def parser():
+    root = argparse.ArgumentParser(prog="buffy-learning")
+    sub = root.add_subparsers(dest="command")
+    sub.add_parser("status")
+    sub.add_parser("next")
+    sub.add_parser("curriculum")
+    sub.add_parser("document")
+    rec = sub.add_parser("record")
+    rec.add_argument("--competency", required=True)
+    rec.add_argument("--title", required=True)
+    rec.add_argument("--evidence", required=True)
+    rec.add_argument("--source", default="")
+    rec.add_argument("--result", choices=("pass", "fail"), required=True)
+    rec.add_argument("--level", type=int)
+    rev = sub.add_parser("review")
+    rev.add_argument("--competency", required=True)
+    rev.add_argument("--result", choices=("pass", "fail"), required=True)
+    rev.add_argument("--evidence", required=True)
+    return root
+
+
+def main():
+    args = parser().parse_args()
+    command = args.command or "status"
+    ledger = load()
+    if command == "status":
+        status(ledger)
+    elif command == "next":
+        name, reason = next_competency(ledger)
+        print(json.dumps({"competency": name, "reason": reason,
+                          "state": ledger.get("competencies", {}).get(name)}, ensure_ascii=False, indent=2))
+    elif command in {"curriculum", "document"}:
+        name = "CURRICULUM.md" if command == "curriculum" else "LEARNING.md"
+        with open(os.path.join(BASE, name), encoding="utf-8") as file:
+            print(file.read())
+    elif command == "record":
+        record(ledger, args)
+    elif command == "review":
+        review(ledger, args)
+
+
+if __name__ == "__main__":
+    main()

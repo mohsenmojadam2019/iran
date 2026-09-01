@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Open Buffy's Persian voice interface in the default browser."""
+import pathlib
+import socket
+import webbrowser
+
+page = pathlib.Path.home() / "novinpendar" / "buffy-voice-fa.html"
+if not page.is_file():
+    raise SystemExit(f"❌ Voice UI not found: {page}")
+try:
+    with socket.create_connection(("127.0.0.1", 7654), timeout=0.4):
+        url = "http://127.0.0.1:7654/voice"
+except OSError:
+    url = page.as_uri()
+webbrowser.open(url)
+print(f"✅ رابط صوتی فارسی Buffy باز شد: {url}")

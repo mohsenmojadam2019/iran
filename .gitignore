@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+*.sqlite3
+*.db
+*.db-journal
+*.jsonl
+browser-profile/
+deepseek-direct-profile/
+logs/
+

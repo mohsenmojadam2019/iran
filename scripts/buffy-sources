@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Incrementally curate GitHub AI-agent sources without executing repositories."""
+import json
+import http.client
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+CATALOG_PATH = os.path.expanduser("~/.config/buffy/sources.json")
+STATE_PATH = os.path.expanduser("~/.config/buffy/source-sync.json")
+SEARCH_QUERY = '"ai agent" in:name,description,readme archived:false'
+MAX_GITHUB_RESULTS = 1000
+PER_PAGE = 100
+
+
+def read_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+    os.replace(temporary, path)
+
+
+def load_catalog():
+    data = read_json(CATALOG_PATH, {"target_count": 1000, "sources": []})
+    data.setdefault("target_count", 1000)
+    data.setdefault("sources", [])
+    return data
+
+
+def load_state():
+    return read_json(STATE_PATH, {
+        "query": SEARCH_QUERY, "next_page": 1, "complete": False,
+        "last_sync": None, "last_error": None,
+        "rate_limit_remaining": None, "rate_limit_reset": None,
+    })
+
+
+def iso_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def sync_one_page(catalog, state, force=False):
+    target = min(int(catalog.get("target_count", 1000)), MAX_GITHUB_RESULTS)
+    if len(catalog["sources"]) >= target:
+        state.update({"complete": True, "last_error": None})
+        write_json(STATE_PATH, state)
+        return {"added": 0, "reason": "target-reached"}
+    page = int(state.get("next_page", 1))
+    max_pages = MAX_GITHUB_RESULTS // PER_PAGE
+    if page > max_pages:
+        state["complete"] = True
+        write_json(STATE_PATH, state)
+        return {"added": 0, "reason": "github-search-window-complete"}
+    last_attempt = float(state.get("last_attempt_epoch") or 0)
+    if not force and time.time() - last_attempt < 60:
+        return {"added": 0, "reason": "recently-attempted"}
+    state["last_attempt_epoch"] = time.time()
+    write_json(STATE_PATH, state)
+
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "buffy-ai-agent-source-curator/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    params = urllib.parse.urlencode({
+        "q": SEARCH_QUERY, "sort": "stars", "order": "desc",
+        "per_page": PER_PAGE, "page": page,
+    })
+    request = urllib.request.Request("https://api.github.com/search/repositories?" + params, headers=headers)
+    try:
+        payload = None
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(request, timeout=25) as response:
+                    payload = json.loads(response.read())
+                    state["rate_limit_remaining"] = response.headers.get("X-RateLimit-Remaining")
+                    state["rate_limit_reset"] = response.headers.get("X-RateLimit-Reset")
+                break
+            except (http.client.HTTPException, TimeoutError) as error:
+                if attempt:
+                    raise error
+                time.sleep(1)
+    except urllib.error.HTTPError as error:
+        state["last_error"] = f"GitHub HTTP {error.code}: {error.reason}"
+        state["last_sync"] = iso_now()
+        state["rate_limit_remaining"] = error.headers.get("X-RateLimit-Remaining")
+        state["rate_limit_reset"] = error.headers.get("X-RateLimit-Reset")
+        write_json(STATE_PATH, state)
+        return {"added": 0, "reason": "http-error", "error": state["last_error"]}
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        state["last_error"] = f"{type(error).__name__}: {error}"
+        state["last_sync"] = iso_now()
+        write_json(STATE_PATH, state)
+        return {"added": 0, "reason": "network-error", "error": state["last_error"]}
+
+    seen = {item.get("url") for item in catalog["sources"]}
+    added = 0
+    for repo in payload.get("items", []):
+        url = repo.get("html_url")
+        if not url or url in seen or len(catalog["sources"]) >= target:
+            continue
+        seen.add(url)
+        catalog["sources"].append({
+            "url": url, "name": repo.get("full_name"),
+            "description": repo.get("description"), "topic": "ai-agent-search",
+            "trust": "unverified-candidate", "status": "needs-review",
+            "stars_at_discovery": repo.get("stargazers_count"),
+            "license": (repo.get("license") or {}).get("spdx_id"),
+            "pushed_at": repo.get("pushed_at"), "discovered_at": iso_now(),
+            "discovery_query": SEARCH_QUERY,
+        })
+        added += 1
+    state.update({
+        "next_page": page + 1,
+        "complete": page + 1 > max_pages or len(catalog["sources"]) >= target,
+        "last_sync": iso_now(), "last_error": None,
+        "github_total_count": payload.get("total_count"),
+    })
+    write_json(CATALOG_PATH, catalog)
+    write_json(STATE_PATH, state)
+    return {"added": added, "page": page, "next_page": state["next_page"]}
+
+
+def select_next(catalog):
+    priorities = (("queued", "agents"), ("queued", "mcp"),
+                  ("needs-review", "ai-agent-search"), ("queued", None),
+                  ("needs-review", None))
+    for status, topic in priorities:
+        item = next((x for x in catalog["sources"] if x.get("status") == status
+                     and (topic is None or x.get("topic") == topic)), None)
+        if item:
+            return item
+    return None
+
+
+def mark(catalog, url, status):
+    if status not in {"queued", "needs-review", "reviewed", "studied", "rejected"}:
+        raise SystemExit("Invalid status: " + status)
+    item = next((x for x in catalog["sources"] if x.get("url") == url), None)
+    if not item:
+        raise SystemExit("Source not found")
+    item.update({"status": status, "status_updated_at": iso_now()})
+    write_json(CATALOG_PATH, catalog)
+
+
+def main():
+    catalog, state = load_catalog(), load_state()
+    command = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if command == "status":
+        counts = {}
+        for item in catalog["sources"]:
+            status = item.get("status", "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        print(json.dumps({"count": len(catalog["sources"]), "target": catalog["target_count"],
+                          "statuses": counts, "github_sync": state}, ensure_ascii=False, indent=2))
+    elif command == "next":
+        item = select_next(catalog)
+        print(json.dumps(item, ensure_ascii=False, indent=2) if item else "No source awaiting study")
+    elif command in {"sync", "refresh-github"}:
+        result = sync_one_page(catalog, state, force="--force" in sys.argv[2:])
+        result["catalog_count"] = len(load_catalog()["sources"])
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif command == "mark" and len(sys.argv) == 4:
+        mark(catalog, sys.argv[2], sys.argv[3])
+        print("Source status updated")
+    else:
+        raise SystemExit("Usage: buffy-sources [status|next|sync [--force]|refresh-github [--force]|mark URL STATUS]")
+
+
+if __name__ == "__main__":
+    main()

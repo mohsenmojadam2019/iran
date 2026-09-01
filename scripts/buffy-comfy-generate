@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Queue a safe, adult, fully-clothed portrait through local ComfyUI API."""
+import argparse, json, os, time, uuid, urllib.request
+
+URL = 'http://127.0.0.1:8188'
+WORKFLOW = os.path.expanduser('~/ComfyUI/user/default/workflows/biglust-khas-face-api.json')
+
+def request(path, payload=None, timeout=10):
+    data = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(URL + path, data=data, headers={'Content-Type':'application/json'} if data else {})
+    with urllib.request.urlopen(req, timeout=timeout) as res: return json.loads(res.read())
+
+def main():
+    p = argparse.ArgumentParser(); p.add_argument('description', nargs='*'); p.add_argument('--dry-run', action='store_true'); args = p.parse_args()
+    with open(WORKFLOW, encoding='utf-8') as f: workflow = json.load(f)
+    detail = ' '.join(args.description).strip()
+    prompt = ('one adult woman, single person, exactly one face, fully clothed, elegant fashion portrait, natural anatomy, detailed eyes, '
+              'realistic skin, professional photography, soft cinematic lighting, tasteful composition')
+    if detail: prompt += ', ' + detail[:500]
+    workflow['7']['inputs']['text'] = prompt
+    workflow['8']['inputs']['text'] = 'multiple people, multiple faces, two faces, extra face, duplicate person, crowd, nude, topless, explicit, pornographic, underage, child, deformed face, different identity, extra limbs, bad hands, distorted anatomy, blurry, low quality'
+    if args.dry_run:
+        print(json.dumps({'workflow': WORKFLOW, 'positive_prompt': prompt, 'negative_prompt': workflow['8']['inputs']['text']}, ensure_ascii=False)); return
+    request('/system_stats')
+    queued = request('/prompt', {'prompt': workflow, 'client_id': str(uuid.uuid4())})
+    prompt_id = queued.get('prompt_id')
+    if not prompt_id: raise SystemExit('ComfyUI prompt queue failed')
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        history = request('/history/' + prompt_id, timeout=10).get(prompt_id)
+        if history and history.get('outputs'):
+            files=[]
+            for node in history['outputs'].values():
+                for image in node.get('images', []): files.append(os.path.join(os.path.expanduser('~/ComfyUI/output'), image['filename']))
+            if files: print(json.dumps({'prompt_id': prompt_id, 'files': files, 'positive_prompt': prompt}, ensure_ascii=False)); return
+        time.sleep(2)
+    raise SystemExit('ComfyUI generation timed out')
+
+if __name__ == '__main__': main()
