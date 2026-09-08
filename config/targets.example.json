@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "github_owner": "your-github-user",
-  "repositories": {},
-  "ssh_hosts": {},
-  "browser": {"default_url": "https://chatgpt.com/"},
-  "comfyui": {"url": "http://127.0.0.1:8188"}
-}
